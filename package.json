@@ -1,0 +1,23 @@
+{
+  "name": "mbus_sim",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/jumoog/mbus_sim#readme",
+  "bugs": {
+    "url": "https://github.com/jumoog/mbus_sim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jumoog/mbus_sim.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "xml2js": "^0.6.2"
+  }
+}
