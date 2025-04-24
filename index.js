@@ -21,14 +21,148 @@ const port = parseInt(process.argv[2], 10);
 const xmlPath = process.argv[3];
 const hexPath = process.argv[4];
 
+// Funktion zum Generieren einer Zufallszahl zwischen min und max
+function getRandomFloat(min, max) {
+  return (Math.random() * (max - min) + min).toFixed(6);
+}
+
+// Neue Hilfsfunktion zum Generieren von passenden Zufallswerten je nach Einheit
+function getRandomValueForUnit(unit, currentValue) {
+  const value = parseFloat(currentValue);
+  switch(unit) {
+    case 'Wh':
+      // Energiewerte leicht erhöhen (0-2% Zunahme)
+      return (value * (1 + Math.random() * 0.02)).toFixed(6);
+    case 'V':
+      // Spannung ±5% um den aktuellen Wert
+      return (value * (0.95 + Math.random() * 0.1)).toFixed(6);
+    case 'A':
+      // Strom ±20% um den aktuellen Wert
+      return (value * (0.8 + Math.random() * 0.4)).toFixed(6);
+    case 'W':
+      // Leistung ±30% um den aktuellen Wert
+      return (value * (0.7 + Math.random() * 0.6)).toFixed(6);
+    default:
+      // Sonstige Werte ±10% um den aktuellen Wert
+      return (value * (0.9 + Math.random() * 0.2)).toFixed(6);
+  }
+}
+
+// M-Bus DIF Konstanten gemäß libmbus
+const DIF = {
+  NO_DATA: 0x00,
+  INT8: 0x01,
+  INT16: 0x02,
+  INT24: 0x03,
+  INT32: 0x04,
+  FLOAT32: 0x05,
+  INT48: 0x06,
+  INT64: 0x07,
+  SELECTION: 0x08,
+  BCD2: 0x09,
+  BCD4: 0x0A,
+  BCD6: 0x0B,
+  BCD8: 0x0C,
+  VARIABLE: 0x0D,
+  BCD12: 0x0E,
+  SPECIAL: 0x0F,
+  DATA_FIELD_4: 0x04,
+  SUBUNIT: 0x40
+};
+
+// M-Bus VIF Konstanten gemäß libmbus
+const VIF = {
+  ENERGY_WH: 0x00, // 0.1Wh to 1000Wh
+  ENERGY_WH_EXP: 0x07, // 10⁰ Wh to 10⁷ Wh
+  VOLUME_M3: 0x13,
+  MASS_KG: 0x15,
+  POWER_W: 0x28,
+  VOLUME_FLOW_M3H: 0x38,
+  FLOW_TEMP_C: 0x5A,
+  RETURN_TEMP_C: 0x5E,
+  MANUFACTURER: 0x0F,
+  ENERGY: 0x04 // Wichtig: Energie wird oft als 0x04 kodiert
+};
+
+// Verbesserte Funktion zum Finden der Datenposition
+function findValuePosition(telegram) {
+  console.log('Analysiere Telegramm-Struktur:');
+  console.log('Header:', telegram.slice(0, 20).toString('hex'));
+  
+  // Suche nach dem ersten Energiewert-Record
+  let i = 20; // Startposition für erste Daten nach Header
+  
+  const dif = telegram[i];
+  const vif = telegram[i + 1];
+  
+  console.log(`Prüfe Position ${i}: DIF=${dif.toString(16)}, VIF=${vif.toString(16)}`);
+  
+  // Prüfe auf korrekten DIF/VIF für Energiewert
+  // DIF 0x10 = Data length 4 bytes, BCD format
+  // VIF 0x04 = Energy in Wh
+  if (dif === 0x10 && vif === 0x04) {
+    const pos = i + 2; // Position nach DIF und VIF
+    console.log(`Gefundene Wertposition: ${pos} (DIF=${dif.toString(16)}, VIF=${vif.toString(16)})`);
+    return {
+      position: pos,
+      dif: dif,
+      vif: vif,
+      type: 'BCD4',
+      value: telegram.slice(pos, pos + 4)
+    };
+  }
+  
+  return null;
+}
+
+function updateValueInTelegram(telegram, valueInfo, value) {
+  const { position, type } = valueInfo;
+  const bcdBuffer = Buffer.alloc(4);
+  
+  // Konvertiere zu ganzer Zahl durch Abschneiden der Nachkommastellen
+  const scaledValue = Math.trunc(parseFloat(value));
+  const valueStr = scaledValue.toString().padStart(8, '0');
+  
+  // Debug Ausgabe
+  console.log('Aktualisiere Wert:');
+  console.log(`  Original: ${value}`);
+  console.log(`  Ganzzahl: ${scaledValue}`);
+  console.log(`  BCD: ${valueStr}`);
+  
+  // BCD Konvertierung (Little Endian)
+  for (let i = 0; i < 4; i++) {
+    const pos = 6 - (i * 2); // Position von rechts nach links
+    const digit1 = parseInt(valueStr[pos], 10);
+    const digit2 = parseInt(valueStr[pos + 1], 10);
+    bcdBuffer[i] = (digit1 << 4) | digit2;
+  }
+  
+  console.log(`  Bytes: ${bcdBuffer.toString('hex')}`);
+  
+  // Kopiere das original Telegram
+  const newTelegram = Buffer.from(telegram);
+  bcdBuffer.copy(newTelegram, position);
+  
+  // Berechne neue Prüfsumme
+  let checksum = 0;
+  for (let i = 4; i < newTelegram.length - 2; i++) {
+    checksum += newTelegram[i];
+  }
+  newTelegram[newTelegram.length - 2] = checksum & 0xFF;
+  
+  return newTelegram;
+}
+
 // Load normative XML and print metadata
 const normData = fs.readFileSync(xmlPath, 'utf8');
 let meterInfo;
+let originalXml;
 xml2js.parseString(normData, { explicitArray: false }, (err, result) => {
   if (err) {
     console.error('Failed to parse XML:', err);
     process.exit(1);
   }
+  originalXml = result;
   const mbus = result.MBusData;
   const info = mbus.SlaveInformation;
   console.log('Meter Slave Information:');
@@ -56,6 +190,14 @@ const hexBytes = hexText
 const meterResponse = Buffer.from(hexBytes);
 console.log(`Loaded meter telegram: ${meterResponse.length} bytes from ${hexPath}`);
 
+// Nach dem Laden des Telegramms, Position bestimmen
+const valueInfo = findValuePosition(meterResponse);
+if (!valueInfo) {
+  console.error('Konnte Wertposition im Telegramm nicht finden!');
+  process.exit(1);
+}
+console.log(`Wertposition im Telegramm: ${valueInfo.position}`);
+
 // MBUS control codes
 const CTRL_REQ_UD1 = 0x05;
 const CTRL_REQ_UD2 = 0x09;
@@ -67,11 +209,37 @@ const server = net.createServer((socket) => {
   console.log(`Client connected: ${socket.remoteAddress}:${socket.remotePort}`);
 
   socket.on('data', (data) => {
+    // Aktualisiere alle DataRecords mit neuen Werten
+    const records = Array.isArray(originalXml.MBusData.DataRecord) ? 
+      originalXml.MBusData.DataRecord : 
+      [originalXml.MBusData.DataRecord];
+
+    records.forEach(record => {
+      const newValue = getRandomValueForUnit(record.Unit, record.Value);
+      record.Value = newValue;
+      console.log(`Updated ${record.Quantity} (${record.Unit}): ${newValue}`);
+    });
+    
+    // Konvertiere zurück zu XML
+    const builder = new xml2js.Builder();
+    const updatedXml = builder.buildObject(originalXml);
+
+    // Aktualisiere den ersten Energiewert im Telegramm
+    const valueInfo = findValuePosition(meterResponse);
+    if (!valueInfo) {
+      console.error('Konnte Wertposition im Telegramm nicht finden!');
+      process.exit(1);
+    }
+
+    // Beim Aktualisieren des Werts (nur erster Wert im Telegramm)
+    const updatedResponse = updateValueInTelegram(meterResponse, valueInfo, records[0].Value);
+
     // Detect short frame: 10 SND_UD1/UD2 ADDR LCS 16
     if (data.length === 5 && data[0] === 0x10 && (data[1] === SND_UD1 || data[1] === SND_UD2) && data[4] === 0x16) {
       console.log('Received short-frame SND_UD request');
-      socket.write(meterResponse);
-      console.log('Sent meter response (full telegram)');
+      console.log(`Sending updated telegram with DataRecord[0]: ${records[0].Value}`);
+      socket.write(updatedResponse);
+      console.log('Sent meter response (updated telegram)');
       return;
     }
     // Detect long frame: 68 L1 L2 68 C A ... LCS 16
@@ -79,8 +247,8 @@ const server = net.createServer((socket) => {
       const ctrl = data[6];
       if (ctrl === CTRL_REQ_UD1 || ctrl === CTRL_REQ_UD2) {
         console.log('Received long-frame read request');
-        socket.write(meterResponse);
-        console.log('Sent meter response (full telegram)');
+        socket.write(updatedResponse);
+        console.log('Sent meter response (updated telegram)');
       } else {
         socket.write(ACK_BYTE);
         console.log('Sent ACK');
