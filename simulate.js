@@ -12,14 +12,15 @@ const fs = require('fs');
 const path = require('path');
 const xml2js = require('xml2js');
 
-if (process.argv.length !== 5) {
-  console.error(`Usage: node ${path.basename(process.argv[1])} <listen_port> <norm_xml> <hex_file>`);
+if (process.argv.length !== 6) {
+  console.error(`Usage: node ${path.basename(process.argv[1])} <listen_port> <norm_xml> <hex_file> <broken telegram yes/no>`);
   process.exit(1);
 }
 
 const port = parseInt(process.argv[2], 10);
 const xmlPath = process.argv[3];
 const hexPath = process.argv[4];
+const broken = process.argv[5];
 
 // Funktion zum Generieren einer Zufallszahl zwischen min und max
 function getRandomFloat(min, max) {
@@ -205,6 +206,26 @@ const SND_UD1 = 0x5B;
 const SND_UD2 = 0x5D;
 const ACK_BYTE = Buffer.from([0xE5]);
 
+// Helper function: Send buffer in 24-byte blocks with delay
+async function sendInChunks(socket, buffer, chunkSize = 24, delayMs = 50) {
+  console.log(`Sending ${buffer.length} bytes in ${chunkSize}-byte chunks (delay ${delayMs}ms)...`);
+  let i = 0;
+  for (let offset = 0; offset < buffer.length; offset += chunkSize) {
+    const chunk = buffer.slice(offset, offset + chunkSize);
+    socket.write(chunk);
+    console.log(`  Sent bytes ${offset}–${offset + chunk.length - 1}`);
+    await new Promise(res => setTimeout(res, delayMs));
+    i++;
+	if (i === 3 && broken === "yes")
+	{
+	  console.log("Abort");
+	  return;
+	}
+
+  }
+  console.log('Finished sending full telegram.');
+}
+
 const server = net.createServer((socket) => {
   console.log(`Client connected: ${socket.remoteAddress}:${socket.remotePort}`);
 
@@ -219,12 +240,7 @@ const server = net.createServer((socket) => {
       record.Value = newValue;
       console.log(`Updated ${record.Quantity} (${record.Unit}): ${newValue}`);
     });
-    
-    // Konvertiere zurück zu XML
-    const builder = new xml2js.Builder();
-    const updatedXml = builder.buildObject(originalXml);
 
-    // Aktualisiere den ersten Energiewert im Telegramm
     const valueInfo = findValuePosition(meterResponse);
     if (!valueInfo) {
       console.error('Konnte Wertposition im Telegramm nicht finden!');
@@ -238,8 +254,7 @@ const server = net.createServer((socket) => {
     if (data.length === 5 && data[0] === 0x10 && (data[1] === SND_UD1 || data[1] === SND_UD2) && data[4] === 0x16) {
       console.log('Received short-frame SND_UD request');
       console.log(`Sending updated telegram with DataRecord[0]: ${records[0].Value}`);
-      socket.write(updatedResponse);
-      console.log('Sent meter response (updated telegram)');
+      await sendInChunks(socket, updatedResponse, 24, 1000);
       return;
     }
     // Detect long frame: 68 L1 L2 68 C A ... LCS 16
@@ -247,8 +262,7 @@ const server = net.createServer((socket) => {
       const ctrl = data[6];
       if (ctrl === CTRL_REQ_UD1 || ctrl === CTRL_REQ_UD2) {
         console.log('Received long-frame read request');
-        socket.write(updatedResponse);
-        console.log('Sent meter response (updated telegram)');
+        await sendInChunks(socket, updatedResponse, 24, 500);
       } else {
         socket.write(ACK_BYTE);
         console.log('Sent ACK');
