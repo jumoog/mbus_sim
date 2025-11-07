@@ -229,7 +229,7 @@ async function sendInChunks(socket, buffer, chunkSize = 24, delayMs = 50) {
 const server = net.createServer((socket) => {
   console.log(`Client connected: ${socket.remoteAddress}:${socket.remotePort}`);
 
-  socket.on('data', (data) => {
+  socket.on('data', async (data) => {
     // Aktualisiere alle DataRecords mit neuen Werten
     const records = Array.isArray(originalXml.MBusData.DataRecord) ? 
       originalXml.MBusData.DataRecord : 
